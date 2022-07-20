@@ -1,0 +1,125 @@
+name: dev - eds NG Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      #Branch Name
+      - feature/cicd-angular
+    paths:
+      #Parent Directory
+      - eds/**
+
+defaults:
+  run:
+    #Parent Directory
+    working-directory: eds
+
+env:
+  #Update the Application Name
+  APP_NAME: 'edsworkflow'
+  #Parent Directory
+  PARENT_DIR: 'eds'
+  #Set this to the node version to use
+  NODE_VERSION: '16.x'
+  TOKEN_NUMBER: ${{ secrets.CICD_GIT_PAT }}
+
+  #Azure Configuration
+  AZ_CREDS: ${{ secrets.SBX_AZURE_CREDENTIALS }}
+  #Set Secret for Publish Profile - Each slot has different Publish Profile
+  PUBLISH_PROFILE: ${{ secrets.DEV_EDS_NG_AZURE_WEBAPP_PUBLISH_PROFILE }} 
+  #Set WEBAPP NAME from the Azure Portal
+  AZURE_WEBAPP_NAME: 'app-edsFE-az-asse-sbx-001'    
+  #Set the slot Name
+  SLOT_NAME: 'dev'     
+
+jobs:
+  Build:
+    runs-on: windows-2019
+    environment:
+      # Set to sbx,dev,uat,sit,prod
+      name: sbx  
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Installing NodeJS
+      uses: actions/setup-node@v1
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+
+    - name: Build
+      run: |
+        npm install
+        npm run build
+    
+#    - name: Lint
+#      run: npm run lint
+    
+#    - name: Test
+#      run: npm run test -- --prod
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}
+        #Change it to output path from angular.json file E.g. eds/wwwroot/
+        path: ${{ env.PARENT_DIR }}/wwwroot/  
+ 
+  Release-Deploy:
+    runs-on: windows-2019
+    needs: Build
+    environment:
+      # set to dev,uat,sit,prod
+      name: sbx  
+      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
+    steps:
+    - name: Download Artifact
+      uses: actions/download-artifact@v3
+      id: download
+      with:
+        name: ${{ env.APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}
+        path: ./${{ env.PARENT_DIR }}/   #path: ~/eds/
+
+    - name: Release & SCM TAG
+      uses: actions/create-release@v1
+      id: create_release
+      env:
+        GITHUB_TOKEN: ${{ env.TOKEN_NUMBER }}
+      with:
+        tag_name: ${{ github.run_number}}
+        release_name: ${{ env.APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}
+
+    - name: Archive Release
+      uses: thedoctor0/zip-release@main
+      with:
+        type: 'zip'
+        path: ./${{ env.PARENT_DIR }}/
+        filename: '${{ env.APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}.zip'
+        #exclusions: '*.git* /*node_modules/* .editorconfig'
+   
+    - name: Upload Release to Github
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ env.TOKEN_NUMBER }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./${{ env.APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}.zip
+        asset_name: ${{ env.APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}.zip
+        asset_content_type: application/zip
+
+    - name: AZ CLI Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ env.AZ_CREDS }}
+
+    - name: 'Deploy to Azure WebApp'
+#      if: ${{ false }}
+      id: deploy-to-webapp
+      uses: azure/webapps-deploy@v1
+      with: 
+        app-name: ${{ env.AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ env.PUBLISH_PROFILE }}
+        package: ./${{ env.PARENT_DIR }}/
+#       package: C:/Users/runneradmin/eds/ 
+        slot-name: ${{ env.SLOT_NAME }}

@@ -1,0 +1,140 @@
+name: dev - iWF CICD Pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      #Branch Name
+      - feature/**
+      #- develop
+    paths:
+      #Parent Directory
+      - iworkflow/**
+      - .github/workflows/**
+
+defaults:
+  run:
+    #Parent Directory
+    working-directory: iworkflow
+
+env:
+  #Set this to the node version to use
+  NUGET_VERSION: '5.3.x'
+   
+  #FrontEnd Details
+  #Update the Application Name
+  FE_APP_NAME: 'iwfFE'
+  #FrontEnd Project Path:
+  FE_CSPROJ_FILE: './Presentation/Web/iWorkflowsWeb/iWorkflowsWeb.csproj'
+
+
+  #Azure Configuration
+  AZ_CREDS: ${{ secrets.SBX_AZURE_CREDENTIALS }}
+  #Set the slot Name
+  SLOT_NAME: 'dev'
+  #Set Secret Keyvault if Any
+  #AZURE_KEYVAULT: 'kviwfpcsazassesbx001'
+
+  #FrontEnd Details
+  #Set Secret for Publish Profile - Each slot has different Publish Profile
+  FE_PUBLISH_PROFILE: ${{ secrets.SBX_DEV_IWF_FE_AZURE_WEBAPP_PUBLISH_PROFILE }} 
+  #Set WEBAPP NAME from the Azure Portal
+  FE_AZURE_WEBAPP_NAME: 'app-iwfFE-az-asse-sbx-001'
+  
+  
+
+jobs:
+  Backend:
+    uses: ./.github/workflows/dev-iwfBE-pipeline.yml
+    secrets: inherit
+
+  Build-FE:
+    runs-on: windows-2019
+    needs: [Backend]
+    environment:
+      # Set to sbx,dev,uat,sit,prod
+      name: sbx
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Installing Nuget
+      uses: nuget/setup-nuget@v1
+      with:
+        nuget-version: ${{ env.NUGET_VERSION }}
+
+    - name: Restore Nuget Package
+      working-directory: ./iworkflow/
+      run: nuget restore
+    
+#    - name: Install MSBuild & Set to ENV:PATH
+    -  uses: microsoft/setup-msbuild@v1.1
+
+    - name: Build
+      run: msbuild ${{ env.FE_CSPROJ_FILE }} /nologo /verbosity:m /t:Build /t:pipelinePreDeployCopyAllFilesToOneFolder /p:_PackageTempDir="\publishedFE\"
+      #run: msbuild AIS_CSI_MVC.csproj /nologo /verbosity:m /t:Build /t:pipelinePreDeployCopyAllFilesToOneFolder /p:Configuration=Release /p:_PackageTempDir="\publishedfe\"
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: ${{ env.FE_APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}
+        #Change it to output path from angular.json file E.g. eds/wwwroot/
+        path: '/publishedFE/**'
+ 
+  Release-Deploy-FE:
+    runs-on: windows-2019
+    needs: Build-FE
+    environment:
+      # set to dev,uat,sit,prod
+      name: sbx  
+      url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+
+    steps:
+    - name: Download Artifact
+      uses: actions/download-artifact@v3
+      id: download
+      with:
+        name: ${{ env.FE_APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}
+        path: ./${{ env.FE_APP_NAME }}/   #path: ~/eds/
+
+    - name: Release & SCM TAG
+      uses: actions/create-release@v1
+      id: create_release
+      env:
+        GITHUB_TOKEN: ${{ secrets.CICD_GIT_PAT }}
+      with:
+        tag_name: ${{ env.FE_APP_NAME }}-v${{ github.run_number}}
+        release_name: ${{ env.FE_APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}
+
+    - name: Archive Release
+      uses: thedoctor0/zip-release@main
+      with:
+        type: 'zip'
+        path: ./${{ env.FE_APP_NAME }}/
+        filename: '${{ env.FE_APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}.zip'
+        exclusions: '*.git* /*node_modules/* .editorconfig'
+   
+    - name: Upload Release to Github
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.CICD_GIT_PAT }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./${{ env.FE_APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}.zip
+        asset_name: ${{ env.FE_APP_NAME }}-release-${{ env.SLOT_NAME }}-v${{ github.run_number }}.zip
+        asset_content_type: application/zip
+
+    - name: AZ CLI Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ env.AZ_CREDS }}
+
+    - name: 'Deploy to Azure WebApp'
+      #if: ${{ false }}
+      id: deploy-to-webapp
+      uses: azure/webapps-deploy@v1
+      with: 
+        app-name: ${{ env.FE_AZURE_WEBAPP_NAME }}
+        publish-profile: ${{ env.FE_PUBLISH_PROFILE }}
+        package: ./${{ env.FE_APP_NAME }}/
+        slot-name: ${{ env.SLOT_NAME }}
